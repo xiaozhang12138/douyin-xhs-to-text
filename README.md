@@ -78,6 +78,45 @@ xhs-link-to-text/
 - whisper 中文小模型对专业术语有误识（如 DHA↔"跌垂"），关键数据须人工校正。
 - 下载内容仅用于个人学习/二次创作，遵守原作者版权与平台规则。
 
+## 命令行安装 / 给 AI 用
+
+### 1. 下载（命令行，任何人都能拉）
+
+```bash
+git clone https://github.com/xiaozhang12138/xhs-link-to-text.git
+cd xhs-link-to-text
+```
+
+### 2. 装依赖（一行）
+
+```bash
+pip install -r requirements.txt        # 核心：下载 + 图文 OCR
+# 视频转写另装：pip install openai-whisper   （系统还需 ffmpeg）
+# 系统级（非 pip）：brew install ffmpeg tesseract tesseract-lang
+```
+
+### 3. 自检环境（AI 拿到先跑这个，缺什么直接告诉你）
+
+```bash
+python3 scripts/check_env.py
+```
+
+### 4. 让 Agent 能直接调用
+
+Skill 只有在 agent 的 skills 目录里才会被识别。把整个文件夹放进去即可：
+
+```bash
+# 用户级（所有项目/对话可用）：
+cp -r . ~/.workbuddy/skills/xhs-link-to-text/
+
+# 或项目级（仅当前项目）：
+# cp -r . <你的项目>/.workbuddy/skills/xhs-link-to-text/
+```
+
+放进之后，agent 读取到 `SKILL.md` 就知道怎么用；你发一条小红书链接，它就能自动下载 → 识别 → 出文字稿。
+
+> 注意：下载和自检脚本本身**不依赖 WorkBuddy**，纯 Python 就能跑（图文精校那条"多模态读图"路线才需要宿主支持）。所以即使没有 WorkBuddy，命令行也能完成下载 + OCR/转写。
+
 ## License
 
 MIT —— 自由使用、修改、再发布，保留版权声明即可。
