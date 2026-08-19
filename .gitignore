@@ -1,0 +1,19 @@
+# 下载产物（运行 skill 时生成，不入库）
+xhs_content/
+*.wav
+*.mp4
+*.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# 本地模型（体积大，按需自行下载）
+vosk-model-small-cn-0.22/
+
+# 系统
+.DS_Store
+*.log
