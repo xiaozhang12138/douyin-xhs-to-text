@@ -50,8 +50,10 @@ def main() -> None:
     check("tesseract", bool(ts), "brew install tesseract tesseract-lang")
     if ts:
         try:
-            out = subprocess.run([ts, "--list-langs"], capture_output=True, text=True).stderr
-            check("  tesseract 中文包 chi_sim", "chi_sim" in out,
+            # --list-langs 在部分版本输出到 stdout，部分到 stderr，合并判断
+            out = subprocess.run([ts, "--list-langs"], capture_output=True, text=True)
+            langs = (out.stdout or "") + (out.stderr or "")
+            check("  tesseract 中文包 chi_sim", "chi_sim" in langs,
                   "brew install tesseract-lang")
         except Exception:
             pass
