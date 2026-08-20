@@ -1,28 +1,39 @@
 """
-视频语音转写封装（小红书链接转文字用）
+视频语音转写封装（抖红视频文案提取器 / douyin-xhs-to-text）
 
-优先使用 openai-whisper（默认 small 中文模型），对术语/专有名词识别明显优于
-轻量离线模型。检测不到 whisper 时给出清晰报错与替代方案。
+转写引擎优先级：
+  1. mlx-whisper（Apple Silicon 加速，最快；默认 small 中文）— 首选
+  2. openai-whisper（CPU/CUDA，通用兜底）
+  3. Vosk + vosk-model-small-cn-0.22（完全离线，无网环境兜底）
+
+转写完成后自动套用 references/term_corrections.json 的【实测确认】同音词校正，
+减少人工校对成本。方言等未确认项默认不启用。
 
 依赖（运行时）：
-  - ffmpeg（whisper 提取音轨需要，已在 PATH）
-  - Python 包 openai-whisper（提供 whisper CLI 或 Python API）
-  - 备选：Vosk + vosk-model-small-cn-0.22（完全离线，无需联网）
+  - ffmpeg（抽取音轨，已在 PATH）
+  - Python 包：mlx-whisper（优先）/ openai-whisper / vosk
+  - Vosk 中文模型（离线兜底用）
 
 用法：
   python3 transcribe.py <video.mp4> [--model small] [--language Chinese] [--out-dir DIR]
   python3 transcribe.py <video.mp4> --text-only        # 只输出纯文本到 stdout
-  python3 transcribe.py <video.mp4> --vosk              # 强制用离线 Vosk（无网环境）
+  python3 transcribe.py <video.mp4> --no-correct       # 关闭术语自动校正
+  python3 transcribe.py <video.mp4> --engine openai    # 指定引擎
+  python3 transcribe.py <video.mp4> --vosk             # 强制离线 Vosk
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 
 
-def _find_whisper() -> str | None:
-    # 优先 PATH 中的 whisper，其次常见 venv 位置
+def _find_ffmpeg() -> bool:
+    return bool(shutil.which("ffmpeg"))
+
+
+def _default_whisper() -> str | None:
     in_path = shutil.which("whisper")
     if in_path:
         return in_path
@@ -33,10 +44,6 @@ def _find_whisper() -> str | None:
         if os.path.exists(c):
             return c
     return None
-
-
-def _find_ffmpeg() -> bool:
-    return bool(shutil.which("ffmpeg"))
 
 
 def _find_vosk_model() -> str | None:
@@ -57,12 +64,63 @@ def _find_vosk_model() -> str | None:
     return None
 
 
-def transcribe_whisper(video: str, model: str, language: str, out_dir: str | None) -> str:
-    whisper = _find_whisper()
+def _load_corrections() -> dict[str, str]:
+    """读取同音词校正词典（合并通用 + 各垂直领域）。"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "references", "term_corrections.json")
+    p = os.path.normpath(p)
+    if not os.path.isfile(p):
+        return {}
+    try:
+        data = json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return {}
+    merged: dict[str, str] = {}
+    for k, v in data.items():
+        if k.startswith("_") or not isinstance(v, dict):
+            continue
+        merged.update(v)
+    return merged
+
+
+def _apply_corrections(text: str, corrections: dict[str, str]) -> str:
+    if not corrections:
+        return text
+    for wrong, right in corrections.items():
+        if wrong in text:
+            text = text.replace(wrong, right)
+    return text
+
+
+def transcribe_mlx(video: str, model: str, language: str, out_dir: str | None) -> str:
+    """mlx-whisper：Apple Silicon 加速，最快。"""
+    if not _find_ffmpeg():
+        raise RuntimeError("未找到 ffmpeg。请先安装 ffmpeg 并加入 PATH。")
+    import mlx_whisper
+    base = os.path.splitext(os.path.basename(video))[0]
+    out_dir = out_dir or os.path.dirname(video) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    out_txt = os.path.join(out_dir, base + ".txt")
+    print(f"[transcribe] mlx-whisper {model} / {language}: {video}")
+    result = mlx_whisper.transcribe(
+        video,
+        path_or_hf_repo=f"mlx-community/whisper-{model}-mlx",
+        language=language.lower(),
+        verbose=False,
+    )
+    text = result.get("text", "")
+    with open(out_txt, "w", encoding="utf-8") as f:
+        f.write(text.strip() + "\n")
+    return out_txt
+
+
+def transcribe_openai(video: str, model: str, language: str, out_dir: str | None) -> str:
+    """openai-whisper：通用兜底（CPU/CUDA）。"""
+    whisper = _default_whisper()
     if not whisper:
         raise RuntimeError(
             "未找到 openai-whisper。请先安装：pip install openai-whisper\n"
-            "或改用 --vosk 走离线 Vosk 路线。"
+            "或改用 --engine mlx / --vosk。"
         )
     if not _find_ffmpeg():
         raise RuntimeError("未找到 ffmpeg。请先安装 ffmpeg 并加入 PATH。")
@@ -70,11 +128,10 @@ def transcribe_whisper(video: str, model: str, language: str, out_dir: str | Non
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         cmd += ["--output_dir", out_dir]
-    print(f"[transcribe] whisper {model} / {language}: {video}")
+    print(f"[transcribe] openai-whisper {model} / {language}: {video}")
     subprocess.run(cmd, check=True)
     base = os.path.splitext(os.path.basename(video))[0]
-    out_txt = os.path.join(out_dir or os.path.dirname(video) or ".", base + ".txt")
-    return out_txt
+    return os.path.join(out_dir or os.path.dirname(video) or ".", base + ".txt")
 
 
 def transcribe_vosk(video: str, out_path: str | None) -> str:
@@ -92,12 +149,13 @@ def transcribe_vosk(video: str, out_path: str | None) -> str:
             "未找到 Vosk 中文模型。请设置环境变量 VOSK_MODEL_DIR 指向下载好的 "
             "vosk-model-small-cn-0.22 目录，或把它放到 ~/vosk-model-small-cn-0.22。"
         )
-    wav_path = (out_path or video + ".wav").replace(".wav.wav", ".wav") if out_path else video + ".wav"
+    wav_path = out_path + ".wav" if out_path else video + ".wav"
     subprocess.run(
         ["ffmpeg", "-y", "-i", video, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     from vosk import Model, KaldiRecognizer
+    import json as _json
     wf = wave.open(wav_path, "rb")
     rec = KaldiRecognizer(Model(model_dir), wf.getframerate())
     texts = []
@@ -106,40 +164,62 @@ def transcribe_vosk(video: str, out_path: str | None) -> str:
         if len(data) == 0:
             break
         if rec.AcceptWaveform(data):
-            import json
-            texts.append(json.loads(rec.Result()).get("text", ""))
-    import json
-    texts.append(json.loads(rec.FinalResult()).get("text", ""))
+            texts.append(_json.loads(rec.Result()).get("text", ""))
+    texts.append(_json.loads(rec.FinalResult()).get("text", ""))
     out = out_path or (video + ".vosk.txt")
     with open(out, "w", encoding="utf-8") as f:
         f.write(" ".join(t for t in texts if t))
     return out
 
 
+def do_transcribe(video: str, engine: str, model: str, language: str, out_dir: str | None) -> str:
+    if engine == "vosk":
+        return transcribe_vosk(video, os.path.join(out_dir, os.path.splitext(os.path.basename(video))[0] + ".txt") if out_dir else None)
+    if engine == "openai":
+        return transcribe_openai(video, model, language, out_dir)
+    if engine == "mlx":
+        return transcribe_mlx(video, model, language, out_dir)
+    # 默认：mlx 优先，失败回退 openai，再回退 vosk
+    try:
+        return transcribe_mlx(video, model, language, out_dir)
+    except Exception as e_mlx:
+        print(f"[transcribe] mlx 失败：{e_mlx}\n[transcribe] 回退 openai-whisper...")
+        try:
+            return transcribe_openai(video, model, language, out_dir)
+        except Exception as e_open:
+            print(f"[transcribe] openai 失败：{e_open}\n[transcribe] 回退离线 Vosk...")
+            return transcribe_vosk(video, os.path.join(out_dir, os.path.splitext(os.path.basename(video))[0] + ".txt") if out_dir else None)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="小红书视频语音转文字（whisper 优先，vosk 兜底）")
+    ap = argparse.ArgumentParser(description="视频语音转文字（mlx-whisper 优先，openai/vosk 兜底）")
     ap.add_argument("video")
     ap.add_argument("--model", default="small")
     ap.add_argument("--language", default="Chinese")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--engine", default="auto", choices=["auto", "mlx", "openai", "vosk"])
     ap.add_argument("--text-only", action="store_true", help="只把纯文本打印到 stdout")
-    ap.add_argument("--vosk", action="store_true", help="强制走离线 Vosk")
+    ap.add_argument("--no-correct", action="store_true", help="关闭术语自动校正")
     args = ap.parse_args()
 
-    if args.vosk:
-        out = transcribe_vosk(args.video, args.out_dir)
+    out = do_transcribe(args.video, args.engine, args.model, args.language, args.out_dir)
+
+    if args.no_correct:
+        final = out
     else:
-        try:
-            out = transcribe_whisper(args.video, args.model, args.language, args.out_dir)
-        except Exception as e:
-            print(f"[transcribe] whisper 失败：{e}\n[transcribe] 尝试 Vosk 离线兜底...")
-            out = transcribe_vosk(args.video, args.out_dir)
+        corrections = _load_corrections()
+        if corrections:
+            raw = open(out, encoding="utf-8").read()
+            fixed = _apply_corrections(raw, corrections)
+            if fixed != raw:
+                open(out, "w", encoding="utf-8").write(fixed)
+                print(f"[transcribe] 已套用术语校正（{len(corrections)} 条候选）")
+        final = out
 
     if args.text_only:
-        with open(out, encoding="utf-8") as f:
-            print(f.read())
+        print(open(final, encoding="utf-8").read())
     else:
-        print(f"[transcribe] 完成：{out}")
+        print(f"[transcribe] 完成：{final}")
 
 
 if __name__ == "__main__":
