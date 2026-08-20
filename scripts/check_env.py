@@ -30,7 +30,7 @@ def check(name: str, ok: bool, hint: str = "") -> None:
 
 
 def main() -> None:
-    print("=== xhs-link-to-text 环境自检 ===\n")
+    print("=== douyin-xhs-to-text 环境自检 ===\n")
     print(f"[Python] {sys.version.split()[0]}  (要求 >= 3.9)")
     py_ok = sys.version_info >= (3, 9)
     check("Python >= 3.9", py_ok)
@@ -40,7 +40,8 @@ def main() -> None:
     check("beautifulsoup4", have("bs4"), "pip install beautifulsoup4")
     check("pytesseract", have("pytesseract"), "pip install pytesseract")
     check("pillow", have("PIL"), "pip install pillow")
-    check("openai-whisper (视频转写)", have("whisper"), "pip install openai-whisper")
+    check("openai-whisper (视频转写兜底)", have("whisper"), "pip install openai-whisper")
+    check("mlx-whisper (Apple Silicon 加速, 首选)", have("mlx_whisper"), "pip install mlx-whisper")
     check("vosk (离线兜底, 可选)", have("vosk"), "pip install vosk")
 
     print("\n[系统二进制]")
@@ -68,7 +69,7 @@ def main() -> None:
 
     print("\n=== 结论 ===")
     print("核心可用（下载 + 图文 OCR）：需 requests / bs4 / pytesseract / pillow / ffmpeg / tesseract(chi_sim)")
-    print("视频转写：需 openai-whisper（联网下载模型）或 vosk + 上述模型（离线）")
+    print("视频转写：优先 mlx-whisper（Apple Silicon 加速），否则 openai-whisper（联网下载模型），再否则 vosk + 上述模型（离线）")
     print("缺项按上面 → 提示安装即可，无需改动代码。")
 
 
