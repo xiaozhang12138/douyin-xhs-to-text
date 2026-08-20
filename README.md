@@ -20,7 +20,8 @@
 - **视频下载开箱即用**：`get_media.py` 走 redfox.hk API 拿无水印直链。本机已预置 `REDFOX_API_KEY`，无需安装浏览器、无需自己注册 Key；未预置时自动回退 video-downloader 内置公共 Key。
 - **小红书图文免登录、免 Key**：`xhs_getter.py` 解析链接里的 `xsec_token`，直连小红书 CDN 拿无水印原图，不需要账号 Cookie、不依赖任何外部 API。
 - **双形态覆盖**：图文走 OCR，视频走 ASR，按类型自动分流。
-- **转写双引擎**：默认 openai-whisper（small 中文，术语更准），无网 / 失败自动兜底 Vosk 离线模型。
+- **转写双引擎**：默认 mlx-whisper（Apple Silicon 加速，small 中文），openai-whisper / Vosk 兜底；支持 `--mode accurate/fast` 切换大模型/小模型。
+- **一键链路**：`run.py` 输入链接自动判断平台/类型 → 下载 → 转写/OCR → 汇总文稿，全程吃 `--mode`。
 - **自包含**：下载脚本、转写封装都打包在 `scripts/` 内，可独立运行。
 
 ## 安装
@@ -42,6 +43,26 @@ pip install -r requirements.txt        # 核心：下载 + 图文 OCR
 
 ## 使用
 
+### 一键链路（推荐）
+
+```bash
+# 自动判断平台/类型 → 下载 → 转写/OCR → 汇总到 ./xhs_output/汇总文稿.md
+python3 scripts/run.py "https://v.douyin.com/xxxx" --mode fast
+python3 scripts/run.py "<链接1>" "<链接2>" --mode accurate --out-dir ./out --json
+```
+
+### 双模速查
+
+| 模式 | 转写（视频） | OCR（图文） | 速度 | 适用 |
+|---|---|---|---|---|
+| `--mode accurate` | `large-v3-turbo-q4`(4bit) + 单温度 | 灰度2x + 多 PSM 融合 + 术语校正 | 慢（90s 片段实测 ≈ 235s） | 精校稿 / 关键数据 |
+| `--mode fast` | `base` + 贪心解码 | 单趟 `--psm 6` | **非常快**（90s 片段实测 ≈ 5s） | 批量归档 / 抓大意 |
+| `--mode balanced`（默认） | `small` | `--psm 3`（可选 `--preprocess`） | 居中 | 日常默认 |
+
+> 所有 whisper 模型走 Apple Silicon 的 mlx 加速；本机已缓存 `base / small / large-v3-turbo-q4`，两种模式均免联网下载。accurate 用 4bit 量化版（fp16 版 3GB 在本机会 swap 到不可用）。
+
+### 分步使用
+
 ```bash
 # 抖音 / 小红书视频：redfox 无水印下载（开箱即用，无需 Key、无需浏览器）
 python3 scripts/get_media.py "https://v.douyin.com/xxxx" --output-dir .
@@ -51,12 +72,12 @@ python3 scripts/get_media.py "<链接1>" "<链接2>" --output-dir . --json
 python3 scripts/xhs_getter.py "https://www.xiaohongshu.com/explore/<id>?xsec_token=..."
 python3 scripts/xhs_getter.py --file links.txt
 
-# 图文：批量 OCR 一步出稿（草稿）
-python3 scripts/ocr_images.py "xhs_content/.../" --preprocess
+# 图文：批量 OCR（fast = 单趟最快；accurate = 多 PSM 融合更准）
+python3 scripts/ocr_images.py "xhs_content/.../" --mode fast
 #     精校：用宿主读图能力逐张识别后人工整理
 
-# 视频：转写
-python3 scripts/transcribe.py "<视频>.mp4" --out-dir .
+# 视频：转写（fast 非常快 / accurate 慢而准）
+python3 scripts/transcribe.py "<视频>.mp4" --mode fast --out-dir .
 #     离线兜底加 --vosk；只要纯文本加 --text-only
 ```
 
@@ -67,10 +88,11 @@ douyin-xhs-to-text/
 ├── SKILL.md              # Skill 元信息与流程
 ├── README.md             # 本文件
 ├── scripts/
+│   ├── run.py            # 一键链路编排器（自动路由 + --mode 双模）
 │   ├── get_media.py      # 视频下载（抖音/小红书，redfox API，开箱即用）
 │   ├── xhs_getter.py     # 小红书图文下载（xsec_token CDN 直连，免 Key）
-│   ├── transcribe.py     # 视频语音转写封装（whisper 优先，vosk 兜底）
-│   └── ocr_images.py     # 图文批量 OCR（tesseract，快速草稿）
+│   ├── transcribe.py     # 视频语音转写封装（mlx-whisper 优先，vosk 兜底，--mode 双模）
+│   └── ocr_images.py     # 图文批量 OCR（tesseract，--mode 双模）
 └── references/
     └── workflow.md       # 详细流程、坑点与合规提示
 ```
