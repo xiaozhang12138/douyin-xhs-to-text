@@ -16,7 +16,9 @@ xhs_getter.py 下载
 判断类型
    ├─ 图文 → 宿主多模态读图逐张 OCR → 拼成文稿（跳过 logo 占位图）
    └─ 视频 → transcribe.py
-                   ├─ whisper small 中文（默认，术语更准）
+                   ├─ --mode accurate : large-v3-turbo + beam5 + temp 回退（慢而准）
+                   ├─ --mode fast     : base + 贪心解码（非常快）
+                   ├─ --mode balanced : small（默认）
                    └─ 失败/Vosk → 离线兜底
    │
    ▼
@@ -29,8 +31,18 @@ AI 二次整理（去口语、顺逻辑、保留数据）→ 通顺话术稿
 |---|---|---|
 | 下载-图文 | `xhs_getter.py` (requests) | 带 xsec_token 直连 CDN，免登录、免 Key 成功 |
 | 下载-视频 | `get_media.py` (redfox API) | 本机预置 REDFOX_API_KEY 开箱即用；无个人 Key 时回退内置公共 Key |
-| 视频转写 | openai-whisper small 中文 | **明显优于** Vosk small-cn；Vosk 对 EPA/DHA/炎症 识别成一堆乱码，弃用 |
-| 图文 OCR | 宿主 Read 多模态 | 13 张图逐张读，第 1 张为 logo 占位需跳过 |
+| 视频转写 | mlx-whisper（Apple Silicon 加速） | 默认 small；**明显优于** Vosk small-cn（Vosk 把 EPA/DHA/炎症 识别成乱码，弃用）；accurate 用 large-v3-turbo、fast 用 base |
+| 图文 OCR | 宿主 Read 多模态 / `ocr_images.py` | 多模态精校几乎零误识；脚本 OCR fast=单趟、accurate=多 PSM 融合+放大+术语校正 |
+
+## 双模（--mode）设计要点（2026-08-20 新增）
+
+- **accurate（慢但准）**：转写 `large-v3-turbo-q4`（4bit 量化，~1GB，已缓存）+ 单温度 + `condition_on_previous_text`；OCR 灰度2x放大 + 多 PSM(3/6/11) 融合取最长 + 套用 `term_corrections.json`。实测 90s 片段 ≈ 235s（约 45× fast）。
+- **fast（非常快）**：转写 `base` + 贪心（`temperature=0`）；OCR 单趟 `--psm 6` 不放大。实测 90s 片段 ≈ 5s。
+- **balanced（默认）**：转写 `small`；OCR `--psm 3`（可选 `--preprocess`）。
+- mlx-whisper **不支持 beam_size/best_of**，解码仅 `temperature`(元组=回退序列) 与 `condition_on_previous_text` 有效；故准确度靠模型尺寸拉开。
+- `large-v3-turbo` 的 fp16(3GB) 在本机内存压力下会严重 swap（90s 片段 6~11 分钟不可用），accurate 改用 4bit 量化版 `large-v3-turbo-q4`。
+- 本机已缓存 `base / small / large-v3-turbo-q4` 三个 mlx 模型，两种模式均**免联网下载**；非 Apple 芯片回退 openai-whisper 时 accurate 封顶 medium。
+- 术语校正词典 `references/term_corrections.json` 与 transcribe 共用，OCR accurate 模式也会套用。
 
 > Whisper 模型下载走 OpenAI CDN（非 HuggingFace）。实测 HuggingFace 代理 502 时 whisper CLI 仍可下；Vosk 完全离线无需联网。
 
