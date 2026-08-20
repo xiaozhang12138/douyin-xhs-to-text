@@ -27,7 +27,8 @@ AI 二次整理（去口语、顺逻辑、保留数据）→ 通顺话术稿
 
 | 环节 | 实际可用 | 备注 |
 |---|---|---|
-| 下载 | `xhs_getter.py` (requests) | 带 xsec_token 直连 CDN，免登录成功 |
+| 下载-图文 | `xhs_getter.py` (requests) | 带 xsec_token 直连 CDN，免登录、免 Key 成功 |
+| 下载-视频 | `get_media.py` (redfox API) | 本机预置 REDFOX_API_KEY 开箱即用；无个人 Key 时回退内置公共 Key |
 | 视频转写 | openai-whisper small 中文 | **明显优于** Vosk small-cn；Vosk 对 EPA/DHA/炎症 识别成一堆乱码，弃用 |
 | 图文 OCR | 宿主 Read 多模态 | 13 张图逐张读，第 1 张为 logo 占位需跳过 |
 
