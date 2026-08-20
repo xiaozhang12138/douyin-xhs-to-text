@@ -15,7 +15,9 @@
   - Vosk 中文模型（离线兜底用）
 
 用法：
-  python3 transcribe.py <video.mp4> [--model small] [--language Chinese] [--out-dir DIR]
+  python3 transcribe.py <video.mp4> [--mode accurate|fast|balanced] [--language Chinese] [--out-dir DIR]
+  python3 transcribe.py <video.mp4> --mode accurate    # 大模型+beam回退，慢而准
+  python3 transcribe.py <video.mp4> --mode fast        # 小模型贪心，非常快
   python3 transcribe.py <video.mp4> --text-only        # 只输出纯文本到 stdout
   python3 transcribe.py <video.mp4> --no-correct       # 关闭术语自动校正
   python3 transcribe.py <video.mp4> --engine openai    # 指定引擎
@@ -27,6 +29,37 @@ import os
 import shutil
 import subprocess
 import sys
+
+
+# ── 双模预设 ─────────────────────────────────────────────
+# accurate : 大模型 + temperature 回退，慢但准（适合要发布的稿子）
+# fast     : 小模型 + 单温度贪心，非常快（适合批量归档/抓大意）
+# balanced : 默认 small，兼顾（原默认行为）
+# 注：mlx-whisper 不支持 beam_size/best_of，解码仅 temperature(元组=回退序列)
+#     + condition_on_previous_text 有效；准确度主要靠模型尺寸拉开差距。
+#     实测：large-v3-turbo 的 fp16(3GB) 在本机内存压力下会严重 swap，90s 片段耗时
+#     6~11 分钟不可用；改用 4bit 量化版 large-v3-turbo-q4（~1GB，已缓存），速度可接受
+#     且准确度接近 fp16。故 accurate 用 q4 大模型 + 单温度，靠模型尺寸保证准确度。
+MODE_PRESETS = {
+    "accurate": dict(model="large-v3-turbo-q4",
+                     temperature=(0.0,), condition_on_previous_text=True),
+    "balanced": dict(model="small",
+                     temperature=(0.0,), condition_on_previous_text=False),
+    "fast":     dict(model="base",
+                     temperature=(0.0,), condition_on_previous_text=False),
+}
+# mlx-community 仓库名并非统一带 -mlx 后缀，逐个映射避免拉错/重复下载
+MLX_REPO = {
+    "tiny": "mlx-community/whisper-tiny",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+}
+# openai-whisper 兜底（多为 CPU）时，accurate 封顶 medium，避免数十分钟
+OPENAI_MODEL = {"fast": "tiny", "balanced": "small", "accurate": "medium"}
 
 
 def _find_ffmpeg() -> bool:
@@ -92,8 +125,9 @@ def _apply_corrections(text: str, corrections: dict[str, str]) -> str:
     return text
 
 
-def transcribe_mlx(video: str, model: str, language: str, out_dir: str | None) -> str:
-    """mlx-whisper：Apple Silicon 加速，最快。"""
+def transcribe_mlx(video: str, model: str, language: str, out_dir: str | None,
+                   decode: dict | None = None) -> str:
+    """mlx-whisper：Apple Silicon 加速，最快。decode 传解码参数（beam/temperature 等）。"""
     if not _find_ffmpeg():
         raise RuntimeError("未找到 ffmpeg。请先安装 ffmpeg 并加入 PATH。")
     import mlx_whisper
@@ -101,12 +135,23 @@ def transcribe_mlx(video: str, model: str, language: str, out_dir: str | None) -
     out_dir = out_dir or os.path.dirname(video) or "."
     os.makedirs(out_dir, exist_ok=True)
     out_txt = os.path.join(out_dir, base + ".txt")
-    print(f"[transcribe] mlx-whisper {model} / {language}: {video}")
+    repo = MLX_REPO.get(model, f"mlx-community/whisper-{model}-mlx")
+    # mlx-whisper 仅支持 temperature(元组=回退序列) 与 condition_on_previous_text，
+    # 不支持 beam_size/best_of，传了会直接报错。
+    ALLOWED = ("temperature", "condition_on_previous_text")
+    kwargs = {}
+    if decode:
+        for k in ALLOWED:
+            if k in decode:
+                kwargs[k] = decode[k]
+    print(f"[transcribe] mlx-whisper {model} / {language} / {repo}"
+          + (f" / decode={decode}" if decode else "") + f": {video}")
     result = mlx_whisper.transcribe(
         video,
-        path_or_hf_repo=f"mlx-community/whisper-{model}-mlx",
+        path_or_hf_repo=repo,
         language=language.lower(),
         verbose=False,
+        **kwargs,
     )
     text = result.get("text", "")
     with open(out_txt, "w", encoding="utf-8") as f:
@@ -172,29 +217,40 @@ def transcribe_vosk(video: str, out_path: str | None) -> str:
     return out
 
 
-def do_transcribe(video: str, engine: str, model: str, language: str, out_dir: str | None) -> str:
+def do_transcribe(video: str, engine: str, model: str, language: str, out_dir: str | None,
+                 mode: str = "balanced") -> str:
+    preset = MODE_PRESETS.get(mode, MODE_PRESETS["balanced"])
+    # --model 显式指定时优先，否则用模式预设
+    if model == "auto":
+        model = preset["model"]
+    decode = {k: v for k, v in preset.items() if k != "model"}
+    # openai 兜底路线用更小的模型名（CPU 跑大模型不现实）
+    if engine == "openai":
+        model = OPENAI_MODEL.get(mode, "small")
     if engine == "vosk":
         return transcribe_vosk(video, os.path.join(out_dir, os.path.splitext(os.path.basename(video))[0] + ".txt") if out_dir else None)
     if engine == "openai":
         return transcribe_openai(video, model, language, out_dir)
     if engine == "mlx":
-        return transcribe_mlx(video, model, language, out_dir)
+        return transcribe_mlx(video, model, language, out_dir, decode)
     # 默认：mlx 优先，失败回退 openai，再回退 vosk
     try:
-        return transcribe_mlx(video, model, language, out_dir)
+        return transcribe_mlx(video, model, language, out_dir, decode)
     except Exception as e_mlx:
         print(f"[transcribe] mlx 失败：{e_mlx}\n[transcribe] 回退 openai-whisper...")
         try:
-            return transcribe_openai(video, model, language, out_dir)
+            return transcribe_openai(video, OPENAI_MODEL.get(mode, "small"), language, out_dir)
         except Exception as e_open:
             print(f"[transcribe] openai 失败：{e_open}\n[transcribe] 回退离线 Vosk...")
             return transcribe_vosk(video, os.path.join(out_dir, os.path.splitext(os.path.basename(video))[0] + ".txt") if out_dir else None)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="视频语音转文字（mlx-whisper 优先，openai/vosk 兜底）")
+    ap = argparse.ArgumentParser(description="视频语音转文字（mlx-whisper 优先，openai/vosk 兜底；支持 --mode 双模）")
     ap.add_argument("video")
-    ap.add_argument("--model", default="small")
+    ap.add_argument("--mode", default="balanced", choices=["accurate", "balanced", "fast"],
+                    help="accurate=大模型慢而准 / fast=小模型非常快 / balanced=默认small")
+    ap.add_argument("--model", default="auto", help="显式指定 whisper 模型（覆盖 --mode 默认）")
     ap.add_argument("--language", default="Chinese")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--engine", default="auto", choices=["auto", "mlx", "openai", "vosk"])
@@ -202,7 +258,7 @@ def main():
     ap.add_argument("--no-correct", action="store_true", help="关闭术语自动校正")
     args = ap.parse_args()
 
-    out = do_transcribe(args.video, args.engine, args.model, args.language, args.out_dir)
+    out = do_transcribe(args.video, args.engine, args.model, args.language, args.out_dir, args.mode)
 
     if args.no_correct:
         final = out
