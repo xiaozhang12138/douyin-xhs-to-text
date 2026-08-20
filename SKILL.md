@@ -2,7 +2,7 @@
 name: douyin-xhs-to-text
 display_name: 抖红视频文案提取器
 description: 把小红书 / 抖音笔记链接（图文或视频）转成可编辑文字稿。视频走 redfox.hk API 无水印下载（本机预置 Key 开箱即用，内置公共 Key 兜底）；小红书图文免登录直连 CDN。图文逐图 OCR，视频语音转写（ASR）。适用于「社媒链接转文字 / 图文 OCR / 视频字幕转写 / 内容归档」。
-version: 1.3.0
+version: 1.4.0
 author: 健康的蛤蟆 / WorkBuddy
 ---
 
@@ -31,7 +31,7 @@ author: 健康的蛤蟆 / WorkBuddy
 1. **视频下载（抖音 + 小红书）**：`scripts/get_media.py`，redfox.hk API 无水印直链（本机 Key 开箱即用，公共 Key 兜底）
 2. **小红书图文下载**：`scripts/xhs_getter.py`（requests + BeautifulSoup，解析 `og:image`，免登录、免 Key）
 3. **图文识别**：tesseract 批量 OCR（`ocr_images.py`，快速草稿）+ 宿主多模态读图（精校）
-4. **视频转写**：`scripts/transcribe.py`（openai-whisper 优先，Vosk 离线兜底）
+4. **视频转写**：`scripts/transcribe.py`（mlx-whisper 优先，Apple Silicon 加速；openai-whisper / Vosk 兜底）
 
 ## 使用流程
 
@@ -45,6 +45,26 @@ author: 健康的蛤蟆 / WorkBuddy
         ↓
    AI 二次整理（去口语、顺逻辑、保留数据）→ 通顺话术稿
 ```
+
+### 一键链路（推荐）
+
+不确定分步怎么用时，直接跑编排器，自动判断平台/类型并选模式：
+
+```bash
+python3 scripts/run.py "<链接>" --mode fast        # 非常快，批量/抓大意
+python3 scripts/run.py "<链接1>" "<链接2>" --mode accurate --out-dir ./out
+# 机器可读汇总：加 --json
+```
+
+### 双模：准确 vs 效率（核心开关 `--mode`）
+
+| 模式 | 转写（视频） | OCR（图文） | 速度 | 适用 |
+|---|---|---|---|---|
+| `--mode accurate` | `large-v3-turbo-q4`（4bit 量化）+ 单温度 + 上下文 | 灰度2x放大 + 多 PSM(3/6/11) 融合取最长 + 术语校正 | 慢（实测 90s 片段 ≈ 235s，约 45× fast） | 要发布的精校稿、关键数据 |
+| `--mode fast` | `base` + 贪心解码（temp 0） | 单趟 `--psm 6`，不放大 | **非常快**（实测 90s 片段 ≈ 5s） | 批量归档、抓大意、索引 |
+| `--mode balanced`（默认） | `small` | `--psm 3`（可选 `--preprocess`） | 居中 | 日常默认 |
+
+> 所有 whisper 模型走 Apple Silicon 的 mlx 加速；本机已缓存 `base / small / large-v3-turbo-q4`，两种模式均**免联网下载**。accurate 用 4bit 量化版（fp16 版 3GB 在本机内存压力下会 swap 到 6–11 分钟，不可用）。非 Apple 芯片会回退 openai-whisper（CPU），此时 accurate 封顶 medium 以免过慢。
 
 ### 步骤 1：下载
 
@@ -67,8 +87,10 @@ python3 scripts/xhs_getter.py --file links.txt          # 批量（每行一个�
 
 两条路线，按速度 / 质量取舍：
 
-- **快速草稿（推荐先用）**：`python3 scripts/ocr_images.py <图片目录> --preprocess`
-  用 tesseract(chi_sim) 批量识别，一步出稿，自动跳过 logo 占位图（<5KB）。适合批量归档、抓大意、做索引。
+- **快速草稿（推荐先用）**：`python3 scripts/ocr_images.py <图片目录> --mode fast`
+  用 tesseract(chi_sim) 单趟识别，一步出稿，自动跳过 logo 占位图（<5KB）。适合批量归档、抓大意、做索引。
+- **高精度 OCR**：`python3 scripts/ocr_images.py <图片目录> --mode accurate`
+  灰度2x放大 + 多 PSM(3/6/11) 融合 + 术语校正，慢但更完整。关键笔记/要发布的稿子用这个。
 - **精校稿**：用宿主多模态读图能力（如 WorkBuddy 的 Read 工具）逐张读取，几乎零误识，适合要对外发布的稿子。
 
 > Tesseract 对艺术字 / Ω 符号 / emoji 有误识（如 Ω3→Q3、低芥酸→低苜酸），关键内容建议回退多模态精校。详见 `references/workflow.md`。
@@ -76,8 +98,9 @@ python3 scripts/xhs_getter.py --file links.txt          # 批量（每行一个�
 ### 步骤 2b：视频 → 文字
 
 ```bash
-python3 scripts/transcribe.py "<视频>.mp4" --out-dir .
-# 离线兜底：--vosk；只要纯文本：--text-only
+python3 scripts/transcribe.py "<视频>.mp4" --mode fast --out-dir .      # 非常快
+python3 scripts/transcribe.py "<视频>.mp4" --mode accurate --out-dir .  # 慢而准
+# 离线兜底：--vosk；只要纯文本：--text-only；显式指定模型：--model medium
 ```
 
 whisper 对同音词（如 DHA↔"跌垂"、炎症↔"盐症"）可能误识，产出后需人工校正明显错误，存疑处用括号标注。
