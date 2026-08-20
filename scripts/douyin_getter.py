@@ -1,363 +1,185 @@
-#!/usr/bin/env python3
 """
-Qoder Video Downloader - API 版本
-使用 redfox.hk API 解析并下载无水印视频/图文
-支持：抖音、小红书、快手、视频号、B站、YouTube、Instagram、X、TikTok、Threads、Facebook、Vimeo 等
+抖音 / 多平台视频下载器（免 key 优先）
 
-Usage:
-    python3 downloader.py <url> [--api-key <key>] [--output-dir <path>]
+设计目标：默认【零 key】。
+
+下载优先级：
+  1. Playwright 无头浏览器拦截真实视频请求（免 key，需浏览器二进制 ~150MB）
+     —— 浏览器原生生成抖音签名，无需 redfox / 无需任何 key
+  2. (可选兜底) redfox.hk API：仅当显式 --use-redfox 或环境变量 REDFOX_API_KEY 存在
+     且 Playwright 不可用时使用。这是外部服务，非默认路径。
+
+依赖：
+  - requests（解析短链 / 兜底下载）
+  - playwright + chromium（免 key 主路径）：pip install playwright && playwright install chromium
+
+用法：
+  python3 douyin_getter.py "<抖音分享链接>" --output-dir ./downloads
+  python3 douyin_getter.py "<链接>" --use-redfox          # 强制走 redfox（需 key）
+  python3 douyin_getter.py "<链接>" --no-playwright        # 跳过浏览器，仅 redfox（需 key）
+
+说明：
+  - 抖音分享短链（v.douyin.com/xxx/）会被自动解析为真实页面。
+  - 视频文件名取自页面标题，自动清理非法字符。
 """
-
 import argparse
-import json
 import os
 import re
 import sys
-import warnings
-from pathlib import Path
 
 import requests
 
-# Suppress urllib3 OpenSSL warning on macOS
-warnings.filterwarnings("ignore", category=Warning)
-warnings.filterwarnings("ignore", message=".*NotOpenSSLWarning.*")
 
-API_URL = "https://redfox.hk/story/api/parseWork/parse"
-CONFIG_DIR = Path.home() / ".qoder" / "apis"
-CONFIG_FILE = CONFIG_DIR / "redfox.json"
-
-ENV_KEY = "REDFOX_API_KEY"
-PUBLIC_API_KEY = "ak_b45b6a6881f4400fb321428947eb6661"
-
-PLATFORM_MAP = {
-    "dy": "抖音",
-    "xhs": "小红书",
-    "xhsw": "小红书",
-    "ks": "快手",
-    "bili": "B站",
-}
-
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-CYAN = "\033[96m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
+UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 "
+      "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1")
+HEADERS = {"User-Agent": UA, "Referer": "https://www.douyin.com/"}
 
 
-def info(msg):
-    print(f"{GREEN}[✓]{RESET} {msg}")
+def _safe_name(s: str) -> str:
+    s = re.sub(r'[\\/:*?"<>|\n\r\t#]', "_", s).strip()
+    return s[:80] or "douyin_video"
 
 
-def warn(msg):
-    print(f"{YELLOW}[!]{RESET} {msg}")
-
-
-def error(msg):
-    print(f"{RED}[✗]{RESET} {msg}")
-
-
-def step(msg):
-    print(f"{CYAN}[→]{RESET} {msg}")
-
-
-def get_api_key(cli_key=None):
-    """Get API key with priority: CLI arg > env var > config file."""
-    if cli_key:
-        return cli_key
-
-    env_key = os.environ.get(ENV_KEY)
-    if env_key:
-        return env_key
-
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text())
-            key = data.get("api_key")
-            if key:
-                return key
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return PUBLIC_API_KEY
-
-
-def save_api_key(api_key):
-    """Persist API key to config file."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps({"api_key": api_key}, indent=2))
-    os.chmod(CONFIG_FILE, 0o600)  # secure file permissions
-    info(f"API Key saved to {CONFIG_FILE}")
-
-
-def sanitize_filename(name):
-    """Remove or replace characters unsafe for filenames."""
-    if not name:
-        return None
-    name = re.sub(r'[\\/*?:"<>|]', "", name)
-    name = name.strip().replace(" ", "_")
-    name = name[:120]  # limit length
-    return name or None
-
-
-def download_file(session, url, filepath, desc="Downloading"):
-    """Download a file with progress display."""
-    try:
-        resp = session.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-
-        total = int(resp.headers.get("content-length", 0))
-        downloaded = 0
-
-        with open(filepath, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+def _download(url: str, dest: str, referer: str = "https://www.douyin.com/") -> str:
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with requests.get(url, headers={"User-Agent": UA, "Referer": referer},
+                      stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(1024 * 256):
                 if chunk:
                     f.write(chunk)
-                    downloaded += len(chunk)
-                    if total > 0:
-                        pct = int(downloaded * 100 / total)
-                        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-                        print(f"\r  {bar} {pct}%", end="", flush=True)
-        print()
-        return True
-
-    except requests.exceptions.RequestException as e:
-        error(f"Download failed: {e}")
-        return False
+    return dest
 
 
-def is_valid_share_url(url):
-    """Check if the URL is a valid sharing link from supported platforms.
-    Returns (is_valid: bool, platform_name: str or None).
-    """
-    # Domain -> Platform mapping for known sharing link patterns
-    platform_patterns = [
-        # 抖音 Douyin
-        (r'(https?://)?(www\.)?v\.douyin\.com/', '抖音'),
-        (r'(https?://)?(www\.)?douyin\.com/(video|jingxuan|note)/', '抖音'),
-        (r'(https?://)?(www\.)?douyin\.com\/user\/', '抖音'),
-        # 小红书 Xiaohongshu
-        (r'(https?://)?(www\.)?xhslink\.(com|cn)/', '小红书'),
-        (r'(https?://)?(www\.)?xiaohongshu\.com/', '小红书'),
-        (r'(https?://)?(www\.)?xhslink\.com/', '小红书'),
-        # 快手 Kuaishou
-        (r'(https?://)?(www\.)?v\.kuaishou\.com/', '快手'),
-        (r'(https?://)?(www\.)?kuaishou\.com/', '快手'),
-        # 视频号 WeChat Channels
-        (r'(https?://)?weixin\.qq\.com/sph/', '视频号'),
-        # B站 Bilibili
-        (r'(https?://)?(www\.)?b23\.tv/', 'B站'),
-        (r'(https?://)?(www\.)?bilibili\.com/video/', 'B站'),
-        # YouTube
-        (r'(https?://)?(www\.)?youtu\.be/', 'YouTube'),
-        (r'(https?://)?(www\.)?youtube\.com/watch\?', 'YouTube'),
-        (r'(https?://)?(www\.)?youtube\.com/shorts/', 'YouTube'),
-        # Instagram
-        (r'(https?://)?(www\.)?instagram\.com/p/', 'Instagram'),
-        (r'(https?://)?(www\.)?instagram\.com/reel/', 'Instagram'),
-        # X / Twitter
-        (r'(https?://)?(www\.)?x\.com/\w+/status/', 'X (Twitter)'),
-        (r'(https?://)?(www\.)?twitter\.com/\w+/status/', 'X (Twitter)'),
-        # TikTok
-        (r'(https?://)?(www\.)?tiktok\.com/@', 'TikTok'),
-        # Threads
-        (r'(https?://)?(www\.)?threads\.net/@', 'Threads'),
-        # Facebook
-        (r'(https?://)?(www\.)?facebook\.com/.*/videos/', 'Facebook'),
-        (r'(https?://)?(www\.)?fb\.com/.*/videos/', 'Facebook'),
-        # Vimeo
-        (r'(https?://)?(www\.)?vimeo\.com/\d+', 'Vimeo'),
-    ]
-    for pattern, name in platform_patterns:
-        if re.search(pattern, url, re.IGNORECASE):
-            return True, name
-    return False, None
+# ----------------------------- 免 key：Playwright 拦截 -----------------------------
+
+def _download_playwright(url: str, output_dir: str) -> str:
+    from playwright.sync_api import sync_playwright
+
+    captured = {}
+    title = "douyin_video"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True,
+                                    args=["--no-sandbox", "--disable-dev-shm-usage"])
+        ctx = browser.new_context(
+            user_agent=UA,
+            viewport={"width": 390, "height": 844},
+            locale="zh-CN",
+        )
+        page = ctx.new_page()
+
+        def on_response(resp):
+            u = resp.url
+            ct = resp.headers.get("content-type", "")
+            if ("video" in ct) or u.endswith((".mp4", ".mov", ".m4s")) or "playaddr" in u or "365yg" in u:
+                size = int(resp.headers.get("content-length", 0) or 0)
+                if size > captured.get("size", 0):
+                    captured["url"] = u
+                    captured["size"] = size
+                    captured["referer"] = resp.headers.get("referer", "https://www.douyin.com/")
+
+        page.on("response", on_response)
+
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # 取标题
+        try:
+            title = page.title() or title
+        except Exception:
+            pass
+        # 触发播放 / 滚动，强制浏览器发出视频请求
+        try:
+            page.evaluate("() => { const v=document.querySelector('video'); if(v){ v.muted=true; v.play().catch(()=>{}); } }")
+        except Exception:
+            pass
+        try:
+            page.mouse.wheel(0, 400)
+        except Exception:
+            pass
+        # 等待视频请求出现
+        try:
+            page.wait_for_event("response",
+                                lambda r: ("video" in r.headers.get("content-type", "")) or
+                                           r.url.endswith((".mp4", ".mov", ".m4s")) or
+                                           "playaddr" in r.url,
+                                timeout=30000)
+        except Exception:
+            pass
+        # 兜底：再从 DOM 拿 <video> src
+        if "url" not in captured:
+            try:
+                src = page.evaluate("() => { const v=document.querySelector('video'); return v? (v.src||(v.querySelector('source')&&v.querySelector('source').src)) : null; }")
+                if src:
+                    captured["url"] = src
+                    captured["size"] = 0
+            except Exception:
+                pass
+        browser.close()
+
+    if "url" not in captured:
+        raise RuntimeError("Playwright 未拦截到视频请求（抖音可能改版或需登录）。可加 --use-redfox 走兜底。")
+
+    dest = os.path.join(output_dir, _safe_name(title) + ".mp4")
+    _download(captured["url"], dest, referer=captured.get("referer", "https://www.douyin.com/"))
+    return dest
 
 
-def show_url_guide():
-    """Show supported platform URL formats."""
-    print(f"\n{YELLOW}╔══════════════════════════════════════════════════════════╗{RESET}")
-    print(f"{YELLOW}║  链接格式不支持或无法识别，请检查是否传入了正确的分享链接  ║{RESET}")
-    print(f"{YELLOW}╠══════════════════════════════════════════════════════════╣{RESET}")
-    print(f"{YELLOW}║  支持的链接格式：                                       ║{RESET}")
-    print(f"{YELLOW}║  🎵 抖音     v.douyin.com/xxx                           ║{RESET}")
-    print(f"{YELLOW}║  📕 小红书   xhslink.com/xxx 或 xhslink.cn/xxx           ║{RESET}")
-    print(f"{YELLOW}║  📱 快手     v.kuaishou.com/xxx                         ║{RESET}")
-    print(f"{YELLOW}║  📺 视频号   weixin.qq.com/sph/xxx                      ║{RESET}")
-    print(f"{YELLOW}║  📺 B站      b23.tv/xxx 或 bilibili.com/video/xxx        ║{RESET}")
-    print(f"{YELLOW}║  ▶️ YouTube  youtu.be/xxx 或 youtube.com/watch?v=xxx     ║{RESET}")
-    print(f"{YELLOW}║  📷 Instagram instagram.com/p/xxx                       ║{RESET}")
-    print(f"{YELLOW}║  🐦 X/Twitter  x.com/xxx/status/xxx                     ║{RESET}")
-    print(f"{YELLOW}║  🎵 TikTok   tiktok.com/@xxx/video/xxx                  ║{RESET}")
-    print(f"{YELLOW}║  🧵 Threads  threads.net/@xxx/post/xxx                  ║{RESET}")
-    print(f"{YELLOW}║  📘 Facebook  facebook.com/xxx/videos/xxx               ║{RESET}")
-    print(f"{YELLOW}║  🎬 Vimeo    vimeo.com/xxxxxx                           ║{RESET}")
-    print(f"{YELLOW}╚══════════════════════════════════════════════════════════╝{RESET}")
-    print()
+# ----------------------------- 兜底：redfox API（需 key）-----------------------------
+
+REDFOX_URL = "https://redfox.hk/story/api/parseWork/parse"
+
+
+def _download_redfox(url: str, output_dir: str, api_key: str | None, source: str = "douyin-xhs-to-text") -> str:
+    key = api_key or os.environ.get("REDFOX_API_KEY")
+    if not key:
+        raise RuntimeError("redfox 兜底需要 REDFOX_API_KEY（免 key 主路径失败，请安装 playwright chromium 后重试）。")
+    r = requests.post(REDFOX_URL, json={"url": url, "source": source},
+                      headers={"Content-Type": "application/json", "X-API-KEY": key}, timeout=60)
+    data = r.json()
+    if data.get("code") not in (0, 200, 2000, "0", "200", "2000"):
+        raise RuntimeError(f"redfox 解析失败：{data}")
+    info = data["data"]
+    video_url = info.get("videoUrl") or info.get("url") or info.get("video")
+    if not video_url:
+        raise RuntimeError("redfox 未返回视频地址（字段：videoUrl）。")
+    title = _safe_name(info.get("title", "douyin_video"))
+    dest = os.path.join(output_dir, title + ".mp4")
+    _download(video_url, dest)
+    return dest
+
+
+# ----------------------------- 入口 -----------------------------
+
+def download(url: str, output_dir: str = ".", use_redfox: bool = False,
+             no_playwright: bool = False, api_key: str | None = None) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1) 免 key 主路径：Playwright
+    if not use_redfox and not no_playwright:
+        try:
+            return _download_playwright(url, output_dir)
+        except Exception as e:
+            print(f"[douyin] Playwright 免 key 路径失败：{e}", file=sys.stderr)
+            if not os.environ.get("REDFOX_API_KEY") and not api_key:
+                raise RuntimeError("免 key 路径不可用，且未检测到 REDFOX_API_KEY。请安装浏览器：pip install playwright && playwright install chromium")
+            print("[douyin] 回退 redfox 兜底（需 key）...", file=sys.stderr)
+
+    # 2) 兜底：redfox（需 key）
+    return _download_redfox(url, output_dir, api_key)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="短视频下载器 - 使用 redfox.hk API 下载无水印视频",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python3 downloader.py https://v.douyin.com/xxxxxx/
-  python3 downloader.py https://b23.tv/xxxxxx --api-key ark_xxxxx
-  python3 downloader.py https://xhslink.com/o/xxxxxx -o ~/Videos
+    ap = argparse.ArgumentParser(description="抖音/多平台视频下载（免 key 优先）")
+    ap.add_argument("url")
+    ap.add_argument("--output-dir", default=".")
+    ap.add_argument("--use-redfox", action="store_true", help="强制走 redfox（需 REDFOX_API_KEY）")
+    ap.add_argument("--no-playwright", action="store_true", help="跳过浏览器，仅 redfox（需 key）")
+    ap.add_argument("--api-key", default=None, help="redfox key（也可设环境变量 REDFOX_API_KEY）")
+    args = ap.parse_args()
 
-也可通过环境变量 REDFOX_API_KEY 配置密钥：
-  export REDFOX_API_KEY=ark_xxxxx
-  python3 downloader.py <url>
-        """,
-    )
-    parser.add_argument("url", help="视频/图文链接")
-    parser.add_argument("--api-key", help="API Key（格式 ark_xxx，不传则读取环境变量或配置文件）")
-    parser.add_argument("-o", "--output-dir", help="输出目录（默认 ~/Downloads/QoderVideos）")
-    parser.add_argument(
-        "--save-key",
-        action="store_true",
-        help="将本次传入的 API Key 保存到配置文件",
-    )
-
-    args = parser.parse_args()
-
-    # ── Banner ──
-    banner = f"""{CYAN}{BOLD}
-  ╔══════════════════════════════════════╗
-  ║     Qoder Video Downloader (API)     ║
-  ║     视频下载去水印工具          ║
-  ╚══════════════════════════════════════╝{RESET}
-"""
-    print(banner)
-
-    # ── API Key ──
-    api_key = get_api_key(cli_key=args.api_key)
-
-    # Save key if requested
-    if args.save_key:
-        save_api_key(api_key)
-
-    # ── URL ──
-    url = args.url.strip().strip('"').strip("'")
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-
-    step(f"URL: {url}")
-
-    # ── URL validation ──
-    is_valid, platform = is_valid_share_url(url)
-    if not is_valid:
-        error("链接格式不支持，无法进行去水印下载")
-        show_url_guide()
-        sys.exit(1)
-
-    info(f"检测到平台: {platform}")
-
-    # ── Call API ──
-    step("Calling redfox.hk API...")
-
-    session = requests.Session()
-    session.headers.update({
-        "Content-Type": "application/json",
-        "X-API-KEY": api_key,
-    })
-
-    try:
-        resp = session.post(API_URL, json={"url": url, "source": "短视频下载器-SkillHub"}, timeout=30)
-        result = resp.json()
-    except requests.exceptions.RequestException as e:
-        error(f"API request failed: {e}")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        error(f"API returned invalid JSON: {resp.text[:200]}")
-        sys.exit(1)
-
-    code = result.get("code")
-    msg = result.get("msg", "")
-
-    # 成功 code 以 2 开头（如 200、2000），其余为错误
-    if not str(code).startswith("2"):
-        if code == 3106:
-            error("缺少 API Key")
-        elif code == 3107:
-            error("API Key 无效或已失效，请检查是否正确")
-            print("  配置方式：export REDFOX_API_KEY=ark_你的密钥")
-        elif code == 400:
-            error(f"请求参数错误: {msg}")
-        else:
-            error(f"API error (code {code}): {msg}")
-        sys.exit(1)
-
-    data = result.get("data")
-    if not data:
-        error("API returned empty data")
-        sys.exit(1)
-
-    aweme_type = data.get("awemeType")
-    platform = data.get("platform", "unknown")
-    title = data.get("title", "untitled")
-
-    print()
-    info(f"Platform: {PLATFORM_MAP.get(platform, platform)}")
-    info(f"Title: {title[:80]}")
-
-    # ── Output directory ──
-    output_dir = args.output_dir or str(Path.home() / "Downloads" / "QoderVideos")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # ── Download ──
-    downloaded_files = []
-
-    if aweme_type == "video":
-        video_url = data.get("videoUrl")
-        if not video_url:
-            error("API did not return video URL")
-            sys.exit(1)
-
-        safe_title = sanitize_filename(title) or f"video_{platform}"
-        filename = f"{safe_title}.mp4"
-        filepath = os.path.join(output_dir, filename)
-
-        info(f"Type: Video")
-        step("Downloading video...")
-
-        if download_file(session, video_url, filepath):
-            downloaded_files.append(filepath)
-
-    elif aweme_type == "photo":
-        image_urls = data.get("imageUrls") or []
-        if not image_urls:
-            error("API did not return image URLs")
-            sys.exit(1)
-
-        safe_title = sanitize_filename(title) or f"photo_{platform}"
-        total = len(image_urls)
-        info(f"Type: Photo (共 {total} 张)")
-
-        for i, img_url in enumerate(image_urls, 1):
-            ext = os.path.splitext(img_url.split("?")[0])[1] or ".jpg"
-            filename = f"{safe_title}_{i}{ext}"
-            filepath = os.path.join(output_dir, filename)
-
-            step(f"Downloading image {i}/{total}...")
-            if download_file(session, img_url, filepath):
-                downloaded_files.append(filepath)
-
-    else:
-        error(f"Unknown awemeType: {aweme_type}")
-        sys.exit(1)
-
-    # ── Result ──
-    if downloaded_files:
-        print(f"\n{GREEN}{BOLD}✓ Download complete!{RESET}")
-        for f in downloaded_files:
-            size_mb = os.path.getsize(f) / (1024 * 1024)
-            print(f"  {f} ({size_mb:.1f} MB)")
-        sys.exit(0)
-    else:
-        print(f"\n{RED}{BOLD}✗ Download failed{RESET}")
-        sys.exit(1)
+    dest = download(args.url, args.output_dir, args.use_redfox, args.no_playwright, args.api_key)
+    print(f"[douyin] 完成：{dest}")
 
 
 if __name__ == "__main__":
