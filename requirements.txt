@@ -13,11 +13,8 @@ pillow>=10.0
 # ── 离线兜底（可选）──
 # pip install vosk  +  下载 vosk-model-small-cn-0.22 并设 VOSK_MODEL_DIR 环境变量
 #
-# ── 抖音免 key 下载（主路径，需浏览器二进制）──
-playwright>=1.40
-#
-# ── 反爬兜底 / 抖音下载（可选）──
-# pip install playwright && playwright install chromium
+# ── 视频下载：redfox.hk API（本机已预置 REDFOX_API_KEY，开箱即用；未预置则自动回退内置公共 Key）──
+# 无需 pip 安装额外包，requests 已在上方。
 #
 # ── 系统级依赖（无法用 pip 装，需另行安装）──
 # ffmpeg    ：brew install ffmpeg (macOS) / apt install ffmpeg (Linux)  —— 视频转写抽音轨
