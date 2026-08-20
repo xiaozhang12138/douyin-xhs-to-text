@@ -44,23 +44,6 @@ def fetch_by_requests(note_url: str):
     return _parse_html(resp.text)
 
 
-def fetch_by_playwright(note_url: str):
-    """方案 B: Playwright（兜底）"""
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent=HEADERS["User-Agent"],
-        )
-        page = ctx.new_page()
-        page.goto(note_url, wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(3000)
-        html = page.content()
-        browser.close()
-    return _parse_html(html)
-
-
 def _parse_html(html: str):
     """从 HTML 提取 og:image, og:video, og:title 和博主昵称"""
     soup = BeautifulSoup(html, "html.parser")
@@ -255,18 +238,8 @@ def get_xhs_content(note_url: str, method: str = "auto", overwrite: bool = False
     if note_url != orig_url:
         print(f"  → {note_url}")
 
-    result = None
-    if method == "playwright":
-        result = fetch_by_playwright(note_url)
-    else:
-        try:
-            result = fetch_by_requests(note_url)
-        except Exception as e:
-            if method == "requests":
-                print(f"  ✗ {e}")
-                return
-            print(f"  ! requests 失败, 切换 Playwright...")
-            result = fetch_by_playwright(note_url)
+    # 免登录直连 CDN（xsec_token 方案，无需浏览器、无需任何 key）
+    result = fetch_by_requests(note_url)
 
     title = result.get("title", "")
     nickname = result.get("nickname", "")
