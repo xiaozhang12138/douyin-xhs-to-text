@@ -1,8 +1,8 @@
 ---
 name: douyin-xhs-to-text
 display_name: 抖红视频文案提取器
-description: 把小红书 / 抖音笔记链接（图文或视频）转成可编辑文字稿。小红书免登录直连 CDN；抖音走 redfox API 下载器。图文逐图 OCR，视频语音转写（ASR）。适用于「社媒链接转文字 / 图文 OCR / 视频字幕转写 / 内容归档」。
-version: 1.1.0
+description: 把小红书 / 抖音笔记链接（图文或视频）转成可编辑文字稿。小红书免登录直连 CDN；抖音走 Playwright 无头浏览器免 key 拦截下载。图文逐图 OCR，视频语音转写（ASR）。适用于「社媒链接转文字 / 图文 OCR / 视频字幕转写 / 内容归档」。
+version: 1.2.0
 author: 健康的蛤蟆 / WorkBuddy
 ---
 
@@ -16,7 +16,7 @@ author: 健康的蛤蟆 / WorkBuddy
 - **小红书视频 / 抖音视频** → 下载无水印视频 → 语音转写（ASR）→ 文字稿
 - （抖音图文暂未验证，待补充）
 
-小红书部分**免登录**：靠链接里的 `xsec_token` 直连 CDN。抖音部分走 redfox.hk 解析 API，需要 API Key（见依赖）。
+小红书部分**免登录**：靠链接里的 `xsec_token` 直连 CDN。抖音部分**默认免 key**：用 Playwright 无头浏览器打开分享页、原生生成签名并拦截真实视频请求；仅当浏览器不可用时，才回退到 redfox.hk API（需 Key，属可选兜底）。
 
 ## 什么时候用
 
@@ -27,7 +27,7 @@ author: 健康的蛤蟆 / WorkBuddy
 ## 核心能力
 
 1. **小红书下载**：`scripts/xhs_getter.py`（requests + BeautifulSoup，解析 `og:image` / `og:video` 元信息，免登录）
-2. **抖音 / 多平台下载**：`scripts/douyin_getter.py`（基于 redfox.hk API，支持抖音 / 快手 / B站 / YouTube 等，需 API Key）
+2. **抖音 / 多平台下载**：`scripts/douyin_getter.py`（Playwright 无头浏览器免 key 拦截真实视频请求；redfox.hk API 仅作可选兜底，需 Key）
 3. **图文识别**：tesseract 批量 OCR（`ocr_images.py`，快速草稿）+ 宿主多模态读图（精校）
 4. **视频转写**：`scripts/transcribe.py`（openai-whisper 优先，Vosk 离线兜底）
 
@@ -47,13 +47,18 @@ author: 健康的蛤蟆 / WorkBuddy
 python3 scripts/xhs_getter.py "<小红书链接>" ["<链接2>" ...]
 ```
 
-抖音（需 `REDFOX_API_KEY`）：
+抖音（**默认免 key**，需先装浏览器）：
 
 ```bash
-export REDFOX_API_KEY=ark_你的key
+# 一次性安装浏览器（约 150MB）
+pip install playwright && playwright install chromium
+# 直接下载，无需任何 Key
 python3 scripts/douyin_getter.py "<抖音链接>" --output-dir .
 # 例：python3 scripts/douyin_getter.py "https://v.douyin.com/xxxx" --output-dir .
 ```
+
+> 仅当 Playwright 不可用、且你确有 redfox key 时，才用兜底：
+> `python3 scripts/douyin_getter.py "<抖音链接>" --use-redfox`  （需 `REDFOX_API_KEY`）
 
 ### 步骤 2a：图文 → 文字
 
@@ -88,15 +93,15 @@ whisper 对同音词（如 DHA↔"跌垂"、炎症↔"盐症"）可能误识，�
 | openai-whisper | 视频中文转写（推荐） | `pip install openai-whisper` |
 | vosk + vosk-model-small-cn-0.22 | 离线转写兜底 | `pip install vosk`（模型另下） |
 | tesseract(chi_sim) + pytesseract | 图文批量 OCR（快速草稿） | 系统装 tesseract + `pip install pytesseract pillow` |
-| **REDFOX_API_KEY**（环境变量） | **抖音 / 多平台下载** | 去 [redfox.hk](https://redfox.hk/settings/api-keys) 注册获取 |
+| **playwright + chromium** | **抖音免 key 下载（主路径）** | `pip install playwright && playwright install chromium` |
+| REDFOX_API_KEY（可选） | 抖音下载兜底（仅 Playwright 不可用时） | 去 [redfox.hk](https://redfox.hk/settings/api-keys) 注册获取 |
 | 多模态读图能力 | 图文精校 OCR | 宿主提供（如 WorkBuddy Read） |
-| playwright（可选） | 反爬兜底 | `pip install playwright` 后 `playwright install` |
 
-> 注：小红书下载默认用 requests；遇反爬可切 Playwright。抖音下载走 redfox.hk API（需自备 Key）。视频转写需联网下载 whisper 模型（走 OpenAI CDN），Vosk 路线完全离线。
+> 注：小红书下载默认用 requests，免登录。抖音下载默认走 Playwright（免 key，浏览器原生生成签名）；仅在浏览器缺失且你提供 redfox key 时才回退 redfox。**抖音线现在默认零 Key、零外部服务**。视频转写需联网下载 whisper 模型（走 OpenAI CDN），Vosk 路线完全离线。
 
 ## 已知边界 / 坑点
 
-- **抖音下载依赖 redfox.hk API，需自备 Key**；抖音图文未验证。
+- **抖音下载默认免 key**：Playwright 无头浏览器拦截真实视频请求（需先 `playwright install chromium`）。仅当浏览器不可用且你有 redfox key 时，才回退 redfox（可选兜底）。抖音图文未验证。
 - 小红书若加强风控，`og:` 元信息可能缺失，此时需 Playwright 或登录态兜底。
 - whisper 中文小模型对专业术语有误识，必须人工校正关键数据（剂量、百分比、专有名词）。
 - 下载内容仅用于个人学习 / 二次创作，注意原作者版权与平台合规。
